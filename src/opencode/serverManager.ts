@@ -226,6 +226,11 @@ export class OpencodeServerManager {
     // "LM Studio Code" instead of OpenCode's built-in "You are opencode…".
     const config = {
       $schema: 'https://opencode.ai/config.json',
+      // Let the model ask the user clarifying questions via the built-in
+      // `question` tool. "allow" surfaces the picker immediately (the picker is
+      // the interaction; no redundant approval gate). The bridge relays the
+      // `question.asked` event and replies via the /question API.
+      permission: { question: 'allow' as const },
       agent: {
         build: { prompt: BUILD_PROMPT },
         plan: { prompt: PLAN_PROMPT },

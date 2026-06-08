@@ -293,6 +293,12 @@ export class ChatBridge {
         case 'permission':
           await this.client?.respondPermission(msg.sessionID, msg.permissionID, msg.response);
           break;
+        case 'questionReply':
+          await this.client?.replyQuestion(msg.requestID, msg.answers);
+          break;
+        case 'questionReject':
+          await this.client?.rejectQuestion(msg.requestID);
+          break;
         case 'openFile':
           await this.openFile(msg.path);
           break;
@@ -718,7 +724,10 @@ export class ChatBridge {
   /** Forward only events that belong to the active session (plus globals). */
   private relayEvent(event: OpencodeEvent): void {
     const sid = sessionIdOf(event);
-    if (sid && this.currentSessionID && sid !== this.currentSessionID) {
+    // Drop a session-scoped event unless it's for the active session. Also drop
+    // it when no session is active yet (sid set, currentSessionID null) so a
+    // stray event mid-init can't leak into the webview.
+    if (sid && sid !== this.currentSessionID) {
       return;
     }
     this.post({ type: 'event', event });

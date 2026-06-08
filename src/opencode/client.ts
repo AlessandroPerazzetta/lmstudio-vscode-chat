@@ -5,6 +5,7 @@ import {
   PermissionResponse,
   PromptBody,
   ProvidersResponse,
+  QuestionAnswer,
   Session,
 } from './protocol';
 
@@ -84,6 +85,20 @@ export class OpencodeClient {
     response: PermissionResponse,
   ): Promise<void> {
     await this.req('POST', `/session/${sessionID}/permissions/${permissionID}`, { response });
+  }
+
+  /**
+   * Answer a pending question from the built-in `question` tool. `answers` has
+   * one entry per question (in order); each entry is the list of chosen option
+   * labels (plus any typed custom answer).
+   */
+  async replyQuestion(requestID: string, answers: QuestionAnswer[]): Promise<void> {
+    await this.req('POST', `/question/${requestID}/reply`, { answers });
+  }
+
+  /** Dismiss a pending question without answering (the run continues). */
+  async rejectQuestion(requestID: string): Promise<void> {
+    await this.req('POST', `/question/${requestID}/reject`, {});
   }
 
   /**
