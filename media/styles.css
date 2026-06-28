@@ -1124,6 +1124,36 @@ body {
   align-items: center;
   gap: 5px;
 }
+/* On the active row the selection background is often a fully-opaque accent
+   (theme-dependent), which makes a purple .load button — and a transparent
+   default/busy one — vanish into it. Restyle the action against the selection's
+   OWN foreground color, which the theme guarantees is legible on that bg. */
+.model-row.active .model-action {
+  border-color: color-mix(
+    in srgb,
+    var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)) 55%,
+    transparent
+  );
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+  background: color-mix(
+    in srgb,
+    var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)) 14%,
+    transparent
+  );
+}
+.model-row.active .model-action.load {
+  background: var(--vscode-list-activeSelectionForeground, #fff);
+  color: var(--vscode-list-activeSelectionBackground, var(--accent));
+  border-color: transparent;
+}
+.model-row.active .model-action.load:hover {
+  opacity: 0.9;
+}
+.model-row.active .model-action.eject:hover {
+  border-color: var(--vscode-errorForeground, #e35d6a);
+  color: var(--vscode-errorForeground, #e35d6a);
+  background: color-mix(in srgb, var(--vscode-errorForeground, #e35d6a) 18%, transparent);
+}
 /* flat, monochrome capability glyphs (vision / tool use) in the model meta */
 .model-caps {
   display: inline-flex;
