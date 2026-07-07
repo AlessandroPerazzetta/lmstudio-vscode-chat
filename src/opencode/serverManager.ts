@@ -292,7 +292,11 @@ export class OpencodeServerManager {
         lmstudio: {
           npm: '@ai-sdk/openai-compatible',
           name: 'LM Studio (local)',
-          options: { baseURL: this.lmStudio.getBaseUrl(), includeUsage: true },
+          options: { 
+            baseURL: this.lmStudio.getBaseUrl(),
+            includeUsage: true,
+            ...(this.lmStudio.getApiKey() ? { apiKey: this.lmStudio.getApiKey() } : {})
+          },
           ...(Object.keys(models).length ? { models } : {}),
         },
       },

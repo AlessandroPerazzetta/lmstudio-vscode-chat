@@ -365,11 +365,11 @@ export class ChatBridge {
           this.postServers(this.connected);
           break;
         case 'addServer':
-          await this.deps.servers.add(msg.name, msg.url);
+          await this.deps.servers.add(msg.name, msg.url, msg.apiKey);
           this.postServers(this.connected);
           break;
         case 'updateServer':
-          await this.deps.servers.update(msg.id, msg.name, msg.url);
+          await this.deps.servers.update(msg.id, msg.name, msg.url, msg.apiKey);
           if (this.deps.servers.active().id === msg.id) {
             await this.switchServer(msg.id);
           } else {
@@ -513,7 +513,12 @@ export class ChatBridge {
   private async doInit(): Promise<ConnectResult> {
     const cfg = getConfig();
     const active = this.deps.servers.active();
+    log(`doInit: server=${active.name}, url=${active.url}, hasApiKey=${!!active.apiKey}`);
+    if (active.apiKey) {
+      log(`doInit: apiKey=${active.apiKey.substring(0, 8)}...`);
+    }
     this.deps.lmStudio.setBaseUrl(active.url);
+    this.deps.lmStudio.setApiKey(active.apiKey);
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
 
     this.post({ type: 'status', text: `Connecting to ${active.name}…` });
@@ -1058,7 +1063,12 @@ export class ChatBridge {
     this.connected = connected;
     this.post({
       type: 'servers',
-      servers: this.deps.servers.list().map((s) => ({ id: s.id, name: s.name, url: s.url })),
+      servers: this.deps.servers.list().map((s) => ({ 
+        id: s.id, 
+        name: s.name, 
+        url: s.url,
+        apiKey: s.apiKey
+      })),
       activeId: this.deps.servers.active().id,
       connected,
     });

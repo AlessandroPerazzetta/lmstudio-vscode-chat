@@ -22,27 +22,81 @@ export interface LMStudioModel {
 
 /** Discovery + lifecycle helper for a local LM Studio server. */
 export class LMStudioClient {
-  constructor(private baseUrl: string) {}
+  constructor(
+    private baseUrl: string,
+    private apiKey?: string,
+  ) {}
 
   setBaseUrl(url: string): void {
     this.baseUrl = url;
+  }
+
+  setApiKey(key?: string): void {
+    this.apiKey = (key || '').trim() || undefined;
   }
 
   getBaseUrl(): string {
     return this.baseUrl;
   }
 
+  getApiKey(): string | undefined {
+    return this.apiKey;
+  }
+
   private get rest(): string {
     return lmStudioRestRoot(this.baseUrl);
   }
 
+  /**
+   * Build fetch headers with optional API key authentication.
+   */
+  private getHeaders(): Record<string, string> {
+    if (this.apiKey) {
+      // Support both Bearer token and X-API-Key header patterns
+      return {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'X-API-Key': this.apiKey,
+      };
+    }
+    return {};
+  }
+
   async checkConnection(): Promise<boolean> {
     try {
-      const res = await fetch(`${this.baseUrl}/models`, {
+      const headers = this.getHeaders();
+      const headerCount = Object.keys(headers).length;
+      log(`checkConnection: url=${this.baseUrl}, hasApiKey=${!!this.apiKey} (${headerCount} headers)`);
+      if (headerCount > 0) {
+        log(`checkConnection: auth headers included`);
+      }
+      
+      // Try without API key first if one is set, to distinguish connection vs auth issues
+      let res = await fetch(`${this.baseUrl}/models`, {
         signal: AbortSignal.timeout(4000),
+        headers,
       });
+      
+      const statusText = res.status === 200 ? 'OK' : `HTTP ${res.status}`;
+      log(`checkConnection: response status=${statusText}`);
+      
+      // For some servers, API key might need to be sent differently
+      if (!res.ok && this.apiKey) {
+        log(`checkConnection: non-200 response (${res.status}), retrying without auth headers`);
+        res = await fetch(`${this.baseUrl}/models`, {
+          signal: AbortSignal.timeout(4000),
+        });
+        log(`checkConnection: retry status=${res.status}`);
+      }
+      
       return res.ok;
-    } catch {
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      // Check if it's a network error vs HTTP error
+      if (errorMsg.includes('fetch failed') || errorMsg.includes('ECONNREFUSED')) {
+        logError(`checkConnection: network error - ${errorMsg}`);
+        return false;
+      }
+      logError('checkConnection failed', err);
       return false;
     }
   }
@@ -60,7 +114,13 @@ export class LMStudioClient {
    */
   async listModels(): Promise<LMStudioModel[]> {
     try {
-      const res = await fetch(`${this.rest}/api/v1/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.rest}/api/v1/models`, { 
+        signal: AbortSignal.timeout(8000),
+        headers: this.getHeaders(),
+      });
+      if (res.status === 401 || res.status === 403) {
+        logError(`listModels: authentication required (${res.status}) - verify API key is correct`);
+      }
       if (res.ok) {
         const json = (await res.json()) as { models?: any[] };
         const arr = json.models ?? [];
@@ -93,7 +153,13 @@ export class LMStudioClient {
     // Fallback: the v0 rich endpoint (may include phantom dup rows, but still
     // carries metadata) when v1 is unavailable on an older LM Studio.
     try {
-      const res = await fetch(`${this.rest}/api/v0/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.rest}/api/v0/models`, { 
+        signal: AbortSignal.timeout(8000),
+        headers: this.getHeaders(),
+      });
+      if (res.status === 401 || res.status === 403) {
+        logError(`listModels /api/v0/models: authentication required (${res.status}) - verify API key is correct`);
+      }
       if (res.ok) {
         const json = (await res.json()) as { data?: any[] };
         const arr = json.data ?? [];
@@ -119,7 +185,13 @@ export class LMStudioClient {
     }
     // Last resort: OpenAI-compatible endpoint (no rich metadata).
     try {
-      const res = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.baseUrl}/models`, { 
+        signal: AbortSignal.timeout(8000),
+        headers: this.getHeaders(),
+      });
+      if (res.status === 401 || res.status === 403) {
+        logError(`listModels /v1/models: authentication required (${res.status}) - verify API key is correct`);
+      }
       if (res.ok) {
         const json = (await res.json()) as { data?: any[] };
         return (json.data ?? [])
@@ -196,7 +268,10 @@ export class LMStudioClient {
   ): Promise<{ instanceId?: string; contextLength?: number }> {
     const res = await fetch(`${this.rest}/api/v1/models/load`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 
+        'content-type': 'application/json',
+        ...this.getHeaders(),
+      },
       body: JSON.stringify({
         model: modelId,
         context_length: contextLength,
@@ -216,7 +291,10 @@ export class LMStudioClient {
   async unloadInstance(instanceId: string): Promise<void> {
     const res = await fetch(`${this.rest}/api/v1/models/unload`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 
+        'content-type': 'application/json',
+        ...this.getHeaders(),
+      },
       body: JSON.stringify({ instance_id: instanceId }),
       signal: AbortSignal.timeout(30000),
     });
@@ -242,7 +320,10 @@ export class LMStudioClient {
    */
   async loadedInstanceIds(modelId: string): Promise<string[]> {
     try {
-      const res = await fetch(`${this.rest}/api/v1/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.rest}/api/v1/models`, { 
+        signal: AbortSignal.timeout(8000),
+        headers: this.getHeaders(),
+      });
       if (!res.ok) {
         return [];
       }

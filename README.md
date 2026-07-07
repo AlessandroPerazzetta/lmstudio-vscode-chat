@@ -24,6 +24,8 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 - **Agent modes** — `build` (can edit) and `plan` (read-only)
 - **Session history** — browse, resume, rename-by-first-message, delete
 - **Auto-context** — reloads the selected model with an adequate context window via the `lms` CLI so OpenCode's large system prompt doesn't overflow a 4096-token default
+- **Multiple servers** — connect to different LM Studio instances (local or remote) and switch between them
+- **API key authentication** — add API keys for servers that require authentication; supports both Bearer tokens and X-API-Key headers
 
 ## Requirements
 
@@ -53,6 +55,17 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 | `lmstudioCode.minContextLength` | `16384` | Context length to (re)load with |
 | `lmstudioCode.gpuOffload` | `max` | GPU offload for `lms load` |
 | `lmstudioCode.mcpServers` | `{}` | MCP servers to expose to the agent (in addition to auto-discovered ones) |
+
+## Multi-server configuration
+
+You can add multiple LM Studio servers via the UI:
+1. Click the **Servers** button in the Activity Bar
+2. Enter server name, URL, and optional API key
+3. Click **Add Server**
+
+Switch between servers by clicking on them in the list. The extension automatically uses each server's configured API key for authentication.
+
+> **API Key Storage**: API keys are stored securely in VS Code's global storage — never in workspace files.
 
 ## MCP servers
 

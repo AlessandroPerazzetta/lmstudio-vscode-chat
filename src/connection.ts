@@ -9,6 +9,7 @@ export interface LmServer {
   id: string;
   name: string;
   url: string; // normalized, ends in /vN
+  apiKey?: string; // optional API key for authentication
 }
 
 let counter = 0;
@@ -45,17 +46,27 @@ export class ServerRegistry {
     await this.context.globalState.update(ACTIVE_KEY, id);
   }
 
-  async add(name: string, url: string): Promise<LmServer> {
+  async add(name: string, url: string, apiKey?: string): Promise<LmServer> {
     const servers = this.list();
-    const server: LmServer = { id: genId(), name: (name || '').trim() || 'Server', url: normalizeServerUrl(url) };
+    const server: LmServer = { 
+      id: genId(), 
+      name: (name || '').trim() || 'Server', 
+      url: normalizeServerUrl(url),
+      apiKey: (apiKey || '').trim() || undefined
+    };
     servers.push(server);
     await this.context.globalState.update(SERVERS_KEY, servers);
     return server;
   }
 
-  async update(id: string, name: string, url: string): Promise<void> {
+  async update(id: string, name: string, url: string, apiKey?: string): Promise<void> {
     const servers = this.list().map((s) =>
-      s.id === id ? { ...s, name: (name || '').trim() || s.name, url: normalizeServerUrl(url) } : s,
+      s.id === id ? { 
+        ...s, 
+        name: (name || '').trim() || s.name, 
+        url: normalizeServerUrl(url),
+        apiKey: (apiKey || '').trim() || undefined
+      } : s,
     );
     await this.context.globalState.update(SERVERS_KEY, servers);
   }

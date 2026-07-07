@@ -283,6 +283,7 @@ function build(): void {
       <div class="server-add">
         <input id="server-add-name" class="server-input" placeholder="Name (e.g. Workstation)" />
         <input id="server-add-url" class="server-input" placeholder="http://192.168.1.50:1234" />
+        <input id="server-add-apikey" class="server-input" type="password" placeholder="API Key (optional)" />
         <button id="server-add-btn" class="model-action load">Add server</button>
       </div>
     </div>
@@ -534,10 +535,17 @@ function build(): void {
     e.stopPropagation();
     const nameEl = document.getElementById('server-add-name') as HTMLInputElement;
     const urlEl = document.getElementById('server-add-url') as HTMLInputElement;
+    const apiKeyEl = document.getElementById('server-add-apikey') as HTMLInputElement;
     if (urlEl.value.trim()) {
-      post({ type: 'addServer', name: nameEl.value, url: urlEl.value });
+      post({ 
+        type: 'addServer', 
+        name: nameEl.value, 
+        url: urlEl.value,
+        apiKey: apiKeyEl.value.trim() || undefined
+      });
       nameEl.value = '';
       urlEl.value = '';
+      apiKeyEl.value = '';
     }
   });
   document.addEventListener('click', (e) => {
@@ -1411,20 +1419,99 @@ function renderServerMenu(): void {
       <span class="model-info">
         <span class="model-name">${escapeHtml(s.name)}${isActive ? ' ·  active' : ''}</span>
         <span class="model-meta">${escapeHtml(s.url)}</span>
+        ${s.apiKey ? '<span class="model-key-indicator" style="color: #888; font-size: 10px;">••••</span>' : ''}
       </span>
-      <button class="model-action eject" title="Remove server">✕</button>`;
-    row.addEventListener('click', () => {
+      <div class="server-actions">
+        <button class="model-action edit" title="Edit server">${icon.pencil}</button>
+        <button class="model-action eject" title="Remove server">✕</button>
+      </div>`;
+    row.addEventListener('click', (e) => {
+      // Only switch if not clicking an action button
+      if ((e.target as HTMLElement).closest('.server-actions')) return;
       if (!isActive) {
         post({ type: 'switchServer', id: s.id });
       }
       closeServerMenu();
     });
-    (row.querySelector('.model-action') as HTMLButtonElement).addEventListener('click', (e) => {
+    row.querySelector('.edit')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Trigger edit server flow
+      void showEditServerModal(s);
+    });
+    (row.querySelector('.eject') as HTMLButtonElement).addEventListener('click', (e) => {
       e.stopPropagation();
       post({ type: 'removeServer', id: s.id });
     });
     serverMenuList.appendChild(row);
   }
+}
+
+// Edit server modal
+let editServerModal: HTMLElement | null = null;
+async function showEditServerModal(server: { id: string; name: string; url: string; apiKey?: string }): Promise<void> {
+  if (editServerModal) return;
+  
+  const container = document.createElement('div');
+  container.className = 'overlay';
+  container.innerHTML = `
+    <div class="overlay-card">
+      <div class="overlay-head">
+        <span>Edit Server</span>
+        <button id="modal-close" class="icon-btn">${icon.close}</button>
+      </div>
+      <div class="form-group">
+        <label>Name</label>
+        <input id="edit-server-name" class="server-input" value="${escapeHtml(server.name)}" />
+      </div>
+      <div class="form-group">
+        <label>URL</label>
+        <input id="edit-server-url" class="server-input" value="${escapeHtml(server.url)}" />
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <input id="edit-server-apikey" class="server-input" type="password" placeholder="(keep empty to remove)" value="${server.apiKey ? '••••••••' : ''}" />
+      </div>
+      <div class="overlay-actions">
+        <button id="modal-save" class="model-action load">Save</button>
+        <button id="modal-cancel" class="clear-all-btn">Cancel</button>
+      </div>
+    </div>
+  `;
+  
+  document.body.appendChild(container);
+  editServerModal = container;
+  
+  const closeModal = () => {
+    if (editServerModal) {
+      editServerModal.remove();
+      editServerModal = null;
+    }
+  };
+  
+  document.getElementById('modal-close')!.addEventListener('click', closeModal);
+  document.getElementById('modal-cancel')!.addEventListener('click', closeModal);
+  
+  document.getElementById('modal-save')!.addEventListener('click', () => {
+    const nameEl = document.getElementById('edit-server-name') as HTMLInputElement;
+    const urlEl = document.getElementById('edit-server-url') as HTMLInputElement;
+    const apiKeyEl = document.getElementById('edit-server-apikey') as HTMLInputElement;
+    
+    post({
+      type: 'updateServer',
+      id: server.id,
+      name: nameEl.value.trim(),
+      url: urlEl.value.trim(),
+      apiKey: (apiKeyEl.value.trim() !== '••••••••' ? apiKeyEl.value : undefined)
+    });
+    closeModal();
+  });
+  
+  // Close on outside click
+  container.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).classList.contains('overlay')) {
+      closeModal();
+    }
+  });
 }
 
 // ---- Composer overflow (⋯) -------------------------------------------------

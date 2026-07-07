@@ -20,7 +20,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const cfg = getConfig();
   const servers = new ServerRegistry(context, cfg.lmStudioBaseUrl);
-  const lmStudio = new LMStudioClient(servers.active().url);
+  const activeServer = servers.active();
+  const lmStudio = new LMStudioClient(activeServer.url, activeServer.apiKey);
   // Bundled binary lives under the extension dir; the managed server's on-disk
   // state is sandboxed under globalStorage so it never collides with a user's
   // own OpenCode install.

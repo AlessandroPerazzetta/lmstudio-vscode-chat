@@ -24,6 +24,7 @@ export interface UiServer {
   id: string;
   name: string;
   url: string;
+  apiKey?: string;
 }
 
 /** A server-provided slash command (a user/built-in command, or a skill). */
@@ -153,8 +154,8 @@ export type WebviewToHost =
   | { type: 'setContextSize'; tokens: number }
   | { type: 'refreshModels' }
   | { type: 'listServers' }
-  | { type: 'addServer'; name: string; url: string }
-  | { type: 'updateServer'; id: string; name: string; url: string }
+  | { type: 'addServer'; name: string; url: string; apiKey?: string }
+  | { type: 'updateServer'; id: string; name: string; url: string; apiKey?: string }
   | { type: 'removeServer'; id: string }
   | { type: 'switchServer'; id: string }
   | { type: 'selectAgent'; agent: 'build' | 'plan' }
