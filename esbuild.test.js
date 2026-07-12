@@ -17,18 +17,22 @@ if (!entryPoints.length) {
   process.exit(1);
 }
 
-esbuild
-  .build({
-    entryPoints,
-    outdir: 'out-test',
-    bundle: true,
-    platform: 'node',
-    target: 'node20',
-    format: 'cjs',
-    sourcemap: 'inline',
-    logLevel: 'warning',
-  })
-  .catch((err) => {
+(async () => {
+  try {
+    await esbuild.build({
+      entryPoints,
+      outdir: 'out-test',
+      bundle: true,
+      platform: 'node',
+      target: 'node20',
+      format: 'cjs',
+      sourcemap: 'inline',
+      logLevel: 'warning',
+    });
+    // Explicitly exit so the parent && chain doesn't proceed until bundling is done.
+    process.exit(0);
+  } catch (err) {
     console.error(err);
     process.exit(1);
-  });
+  }
+})();
