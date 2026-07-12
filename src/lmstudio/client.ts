@@ -22,7 +22,10 @@ export interface LMStudioModel {
 
 /** Discovery + lifecycle helper for a local LM Studio server. */
 export class LMStudioClient {
-  constructor(private baseUrl: string) {}
+  constructor(
+    private baseUrl: string,
+    private apiKey?: string,
+  ) {}
 
   setBaseUrl(url: string): void {
     this.baseUrl = url;
@@ -32,19 +35,56 @@ export class LMStudioClient {
     return this.baseUrl;
   }
 
+  /** Bearer key for servers behind an authenticating proxy (per LmServer). */
+  setApiKey(key: string | undefined): void {
+    this.apiKey = (key ?? '').trim() || undefined;
+  }
+
+  getApiKey(): string | undefined {
+    return this.apiKey;
+  }
+
   private get rest(): string {
     return lmStudioRestRoot(this.baseUrl);
   }
 
-  async checkConnection(): Promise<boolean> {
+  /**
+   * Fetch headers for this server. LM Studio itself is unauthenticated; the
+   * key exists for remote instances behind a reverse proxy, sent as a
+   * standard OpenAI-style `Authorization: Bearer` (the same scheme the chat
+   * path uses via the provider's `apiKey` option, so discovery and inference
+   * always authenticate identically).
+   */
+  private headers(extra?: Record<string, string>): Record<string, string> {
+    return {
+      ...(extra ?? {}),
+      ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+    };
+  }
+
+  /**
+   * Probe the server. 'auth-required' means it answered but rejected our
+   * credentials (401/403) — a very different user problem from 'unreachable',
+   * so callers can say "fix your key" instead of "start the server".
+   * Deliberately does not log: the health loop calls this every few seconds.
+   */
+  async checkConnectionStatus(): Promise<'ok' | 'auth-required' | 'unreachable'> {
     try {
       const res = await fetch(`${this.baseUrl}/models`, {
         signal: AbortSignal.timeout(4000),
+        headers: this.headers(),
       });
-      return res.ok;
+      if (res.status === 401 || res.status === 403) {
+        return 'auth-required';
+      }
+      return res.ok ? 'ok' : 'unreachable';
     } catch {
-      return false;
+      return 'unreachable';
     }
+  }
+
+  async checkConnection(): Promise<boolean> {
+    return (await this.checkConnectionStatus()) === 'ok';
   }
 
   /**
@@ -60,7 +100,10 @@ export class LMStudioClient {
    */
   async listModels(): Promise<LMStudioModel[]> {
     try {
-      const res = await fetch(`${this.rest}/api/v1/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.rest}/api/v1/models`, {
+        signal: AbortSignal.timeout(8000),
+        headers: this.headers(),
+      });
       if (res.ok) {
         const json = (await res.json()) as { models?: any[] };
         const arr = json.models ?? [];
@@ -93,7 +136,10 @@ export class LMStudioClient {
     // Fallback: the v0 rich endpoint (may include phantom dup rows, but still
     // carries metadata) when v1 is unavailable on an older LM Studio.
     try {
-      const res = await fetch(`${this.rest}/api/v0/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.rest}/api/v0/models`, {
+        signal: AbortSignal.timeout(8000),
+        headers: this.headers(),
+      });
       if (res.ok) {
         const json = (await res.json()) as { data?: any[] };
         const arr = json.data ?? [];
@@ -119,7 +165,10 @@ export class LMStudioClient {
     }
     // Last resort: OpenAI-compatible endpoint (no rich metadata).
     try {
-      const res = await fetch(`${this.baseUrl}/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.baseUrl}/models`, {
+        signal: AbortSignal.timeout(8000),
+        headers: this.headers(),
+      });
       if (res.ok) {
         const json = (await res.json()) as { data?: any[] };
         return (json.data ?? [])
@@ -196,7 +245,7 @@ export class LMStudioClient {
   ): Promise<{ instanceId?: string; contextLength?: number }> {
     const res = await fetch(`${this.rest}/api/v1/models/load`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({
         model: modelId,
         context_length: contextLength,
@@ -216,7 +265,7 @@ export class LMStudioClient {
   async unloadInstance(instanceId: string): Promise<void> {
     const res = await fetch(`${this.rest}/api/v1/models/unload`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ instance_id: instanceId }),
       signal: AbortSignal.timeout(30000),
     });
@@ -242,7 +291,10 @@ export class LMStudioClient {
    */
   async loadedInstanceIds(modelId: string): Promise<string[]> {
     try {
-      const res = await fetch(`${this.rest}/api/v1/models`, { signal: AbortSignal.timeout(8000) });
+      const res = await fetch(`${this.rest}/api/v1/models`, {
+        signal: AbortSignal.timeout(8000),
+        headers: this.headers(),
+      });
       if (!res.ok) {
         return [];
       }

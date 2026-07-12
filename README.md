@@ -24,6 +24,7 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 - **Agent modes** — `build` (can edit) and `plan` (read-only)
 - **Session history** — browse, resume, rename-by-first-message, delete
 - **Auto-context** — reloads the selected model with an adequate context window via the `lms` CLI so OpenCode's large system prompt doesn't overflow a 4096-token default
+- **Multiple servers with optional API keys** — register several LM Studio instances (local or remote) in the servers menu and switch between them; a per-server API key (sent as `Authorization: Bearer`) supports remote instances behind an authenticating reverse proxy. Keys live in VS Code's encrypted Secret Storage — never in settings files, and never sent back to the UI
 
 ## Requirements
 

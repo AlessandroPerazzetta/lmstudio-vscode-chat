@@ -21,6 +21,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const cfg = getConfig();
   const servers = new ServerRegistry(context, cfg.lmStudioBaseUrl);
   const lmStudio = new LMStudioClient(servers.active().url);
+  // Hydrate the active server's key early (SecretStorage is async, activate is
+  // not). Consumers that spawn OpenCode re-resolve it themselves; this only
+  // narrows the window where the shared client is keyless.
+  void servers.apiKeyFor(servers.active().id).then((key) => lmStudio.setApiKey(key));
   // Bundled binary lives under the extension dir; the managed server's on-disk
   // state is sandboxed under globalStorage so it never collides with a user's
   // own OpenCode install.
@@ -71,6 +75,13 @@ export function activate(context: vscode.ExtensionContext): void {
         { location: vscode.ProgressLocation.Notification, title: 'Restarting OpenCode server…' },
         async () => {
           try {
+            // Mirror doInit: the provider config is baked at spawn from the
+            // shared client, which may not have been hydrated yet if no panel
+            // has connected — resolve the active server's url+key first.
+            const active = servers.active();
+            const apiKey = await servers.apiKeyFor(active.id);
+            lmStudio.setBaseUrl(active.url);
+            lmStudio.setApiKey(apiKey);
             await server!.restart();
             vscode.window.showInformationMessage('LM Studio Code: OpenCode server restarted.');
           } catch (err) {

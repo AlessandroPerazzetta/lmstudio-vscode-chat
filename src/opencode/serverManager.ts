@@ -32,6 +32,13 @@ export class OpencodeServerManager {
   private baseUrl: string | undefined;
   private client: OpencodeClient | undefined;
   private starting: Promise<ServerStartResult> | undefined;
+  /**
+   * The (LM Studio baseUrl, apiKey) pair the running server's config was built
+   * from. The config is baked into the process at spawn, so if either changes
+   * afterwards (server switch, key edit) the running instance is stale and
+   * start() must respawn instead of reusing it.
+   */
+  private bakedIdentity: string | undefined;
   private readonly exitListeners = new Set<() => void>();
   /** Procs we killed on purpose, so their `exit` doesn't trigger reconnects. */
   private readonly killed = new WeakSet<ChildProcess>();
@@ -59,10 +66,21 @@ export class OpencodeServerManager {
     return { dispose: () => this.exitListeners.delete(cb) };
   }
 
+  private currentIdentity(): string {
+    return JSON.stringify([this.lmStudio.getBaseUrl(), this.lmStudio.getApiKey() ?? null]);
+  }
+
   /** Start (or return the in-flight start of) the server. Idempotent. */
   async start(): Promise<ServerStartResult> {
     if (this.client && this.baseUrl) {
-      return { baseUrl: this.baseUrl, client: this.client };
+      if (this.bakedIdentity === this.currentIdentity()) {
+        return { baseUrl: this.baseUrl, client: this.client };
+      }
+      // The LM Studio url/key changed since this instance was configured
+      // (e.g. a key edit, or a spawn that raced ahead of key hydration) —
+      // reusing it would send chat requests with stale credentials.
+      log('opencode server config is stale (LM Studio url/key changed) — respawning');
+      this.dispose();
     }
     if (this.starting) {
       return this.starting;
@@ -85,6 +103,7 @@ export class OpencodeServerManager {
     }
     await this.prepareBundledBinary(bin);
 
+    const bakedIdentity = this.currentIdentity();
     const configContent = await this.buildConfigContent();
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
     const env = this.buildEnv(configContent);
@@ -106,6 +125,7 @@ export class OpencodeServerManager {
     // Confirm health before declaring ready.
     await this.waitHealthy(client);
     this.client = client;
+    this.bakedIdentity = bakedIdentity;
 
     proc.on('exit', (code, signal) => {
       const intentional = this.killed.has(proc);
@@ -298,13 +318,45 @@ export class OpencodeServerManager {
         lmstudio: {
           npm: '@ai-sdk/openai-compatible',
           name: 'LM Studio (local)',
-          options: { baseURL: this.lmStudio.getBaseUrl(), includeUsage: true },
+          options: {
+            baseURL: this.lmStudio.getBaseUrl(),
+            includeUsage: true,
+            // Same Bearer key discovery uses — for servers behind an auth proxy.
+            ...this.apiKeyOption(),
+          },
           ...(Object.keys(models).length ? { models } : {}),
         },
       },
       ...(Object.keys(mcp).length ? { mcp } : {}),
     };
     return JSON.stringify(config);
+  }
+
+  /**
+   * Provider `apiKey` option for the injected config. OPENCODE_CONFIG_CONTENT
+   * is process environment, and OpenCode's stdio MCP servers inherit that
+   * environment — so a literal key there would be handed to every third-party
+   * MCP process. Instead the key is written to a 0600 file in our private
+   * dataDir and referenced via OpenCode's `{file:...}` placeholder, which is
+   * substituted when the server loads the config (verified against 1.17.18).
+   * Falls back to the literal only if the file can't be written.
+   */
+  private apiKeyOption(): Record<string, string> {
+    const apiKey = this.lmStudio.getApiKey();
+    const keyFile = path.join(this.dataDir, 'lmstudio-api-key');
+    if (!apiKey) {
+      fs.rmSync(keyFile, { force: true });
+      return {};
+    }
+    try {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+      fs.writeFileSync(keyFile, apiKey, { mode: 0o600 });
+      fs.chmodSync(keyFile, 0o600); // writeFileSync mode only applies on create
+      return { apiKey: `{file:${keyFile}}` };
+    } catch (err) {
+      logError('could not write api key file; passing key inline', err);
+      return { apiKey };
+    }
   }
 
   /** Absolute path to the binary bundled inside the VSIX (if present). */
@@ -392,5 +444,6 @@ export class OpencodeServerManager {
     this.proc = undefined;
     this.baseUrl = undefined;
     this.client = undefined;
+    this.bakedIdentity = undefined;
   }
 }

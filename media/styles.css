@@ -2034,3 +2034,47 @@ body.compacting .send-btn {
 .send-btn:disabled {
   cursor: not-allowed;
 }
+
+/* ---- Server edit overlay + API key badge ---------------------------------- */
+.server-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+}
+.server-edit-form .server-input {
+  margin-bottom: 6px;
+}
+.server-edit-label {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+.server-edit-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.server-edit-check.hidden {
+  display: none;
+}
+.server-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.server-key-badge {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  border-radius: 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}

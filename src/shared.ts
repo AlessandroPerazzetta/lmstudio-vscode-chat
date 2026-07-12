@@ -24,6 +24,8 @@ export interface UiServer {
   id: string;
   name: string;
   url: string;
+  /** Whether a key is stored for this server — the key itself never reaches the webview. */
+  hasApiKey: boolean;
 }
 
 /** A server-provided slash command (a user/built-in command, or a skill). */
@@ -83,6 +85,8 @@ export type HostToWebview =
       cwd: string;
       serverReady: boolean;
       lmStudioConnected: boolean;
+      /** Set when LM Studio answered 401/403 — reachable, but the request was rejected. */
+      lmStudioAuthRequired?: boolean;
       minContext: number;
     }
   | { type: 'models'; models: UiModel[]; currentModel: string | null }
@@ -153,8 +157,10 @@ export type WebviewToHost =
   | { type: 'setContextSize'; tokens: number }
   | { type: 'refreshModels' }
   | { type: 'listServers' }
-  | { type: 'addServer'; name: string; url: string }
-  | { type: 'updateServer'; id: string; name: string; url: string }
+  | { type: 'addServer'; name: string; url: string; apiKey?: string }
+  // apiKey is a tri-state edit: undefined keeps the stored key, null removes it,
+  // a non-blank string replaces it.
+  | { type: 'updateServer'; id: string; name: string; url: string; apiKey?: string | null }
   | { type: 'removeServer'; id: string }
   | { type: 'switchServer'; id: string }
   | { type: 'selectAgent'; agent: 'build' | 'plan' }

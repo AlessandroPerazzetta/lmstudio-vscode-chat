@@ -42,6 +42,7 @@ interface State {
   busy: boolean;
   serverReady: boolean;
   lmStudioConnected: boolean;
+  lmStudioAuthRequired: boolean;
   thinking: boolean;
   pendingImages: UiImage[];
   minContext: number;
@@ -67,6 +68,7 @@ const state: State = {
   busy: false,
   serverReady: false,
   lmStudioConnected: false,
+  lmStudioAuthRequired: false,
   thinking: persisted.thinking ?? true,
   pendingImages: [],
   minContext: 32768,
@@ -283,7 +285,33 @@ function build(): void {
       <div class="server-add">
         <input id="server-add-name" class="server-input" placeholder="Name (e.g. Workstation)" />
         <input id="server-add-url" class="server-input" placeholder="http://192.168.1.50:1234" />
+        <input id="server-add-key" class="server-input" type="password" autocomplete="off" placeholder="API key (optional, for auth proxies)" />
         <button id="server-add-btn" class="model-action load">Add server</button>
+      </div>
+    </div>
+    <div id="server-edit-overlay" class="overlay hidden">
+      <div class="overlay-card">
+        <div class="overlay-head">
+          <span>Edit server</span>
+          <div class="overlay-head-actions">
+            <button id="server-edit-close" class="icon-btn">${icon.close}</button>
+          </div>
+        </div>
+        <div class="server-edit-form">
+          <label class="server-edit-label" for="server-edit-name">Name</label>
+          <input id="server-edit-name" class="server-input" />
+          <label class="server-edit-label" for="server-edit-url">URL</label>
+          <input id="server-edit-url" class="server-input" />
+          <label class="server-edit-label" for="server-edit-key">API key</label>
+          <input id="server-edit-key" class="server-input" type="password" autocomplete="off" />
+          <label id="server-edit-remove-row" class="server-edit-check hidden">
+            <input id="server-edit-remove-key" type="checkbox" /> Remove the stored key
+          </label>
+          <div class="server-edit-actions">
+            <button id="server-edit-save" class="model-action load">Save</button>
+            <button id="server-edit-cancel" class="clear-all-btn">Cancel</button>
+          </div>
+        </div>
       </div>
     </div>
     <div id="history-overlay" class="overlay hidden">
@@ -534,10 +562,30 @@ function build(): void {
     e.stopPropagation();
     const nameEl = document.getElementById('server-add-name') as HTMLInputElement;
     const urlEl = document.getElementById('server-add-url') as HTMLInputElement;
+    const keyEl = document.getElementById('server-add-key') as HTMLInputElement;
     if (urlEl.value.trim()) {
-      post({ type: 'addServer', name: nameEl.value, url: urlEl.value });
+      post({ type: 'addServer', name: nameEl.value, url: urlEl.value, apiKey: keyEl.value.trim() || undefined });
       nameEl.value = '';
       urlEl.value = '';
+      keyEl.value = '';
+    }
+  });
+  document.getElementById('server-edit-close')!.addEventListener('click', closeServerEdit);
+  document.getElementById('server-edit-cancel')!.addEventListener('click', closeServerEdit);
+  document.getElementById('server-edit-save')!.addEventListener('click', saveServerEdit);
+  // "Remove key" wins over a typed replacement — make that visible by
+  // disabling (and clearing) the key field while it's checked.
+  document.getElementById('server-edit-remove-key')!.addEventListener('change', (e) => {
+    const remove = (e.target as HTMLInputElement).checked;
+    const keyEl = document.getElementById('server-edit-key') as HTMLInputElement;
+    keyEl.disabled = remove;
+    if (remove) {
+      keyEl.value = '';
+    }
+  });
+  document.getElementById('server-edit-overlay')!.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) {
+      closeServerEdit();
     }
   });
   document.addEventListener('click', (e) => {
@@ -1410,8 +1458,9 @@ function renderServerMenu(): void {
       <span class="model-dot${isActive && state.lmStudioConnected ? ' loaded' : ''}"></span>
       <span class="model-info">
         <span class="model-name">${escapeHtml(s.name)}${isActive ? ' ·  active' : ''}</span>
-        <span class="model-meta">${escapeHtml(s.url)}</span>
+        <span class="model-meta">${escapeHtml(s.url)}${s.hasApiKey ? '<span class="server-key-badge" title="API key configured">key</span>' : ''}</span>
       </span>
+      <button class="model-action server-edit" title="Edit server">${icon.pencil}</button>
       <button class="model-action eject" title="Remove server">✕</button>`;
     row.addEventListener('click', () => {
       if (!isActive) {
@@ -1419,12 +1468,62 @@ function renderServerMenu(): void {
       }
       closeServerMenu();
     });
-    (row.querySelector('.model-action') as HTMLButtonElement).addEventListener('click', (e) => {
+    (row.querySelector('.server-edit') as HTMLButtonElement).addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeServerMenu();
+      openServerEdit(s);
+    });
+    (row.querySelector('.eject') as HTMLButtonElement).addEventListener('click', (e) => {
       e.stopPropagation();
       post({ type: 'removeServer', id: s.id });
     });
     serverMenuList.appendChild(row);
   }
+}
+
+// ---- Server edit overlay ----------------------------------------------------
+
+/** The server currently open in the edit overlay (null when closed). */
+let editingServer: UiServer | null = null;
+
+function openServerEdit(s: UiServer): void {
+  editingServer = s;
+  (document.getElementById('server-edit-name') as HTMLInputElement).value = s.name;
+  (document.getElementById('server-edit-url') as HTMLInputElement).value = s.url;
+  const keyEl = document.getElementById('server-edit-key') as HTMLInputElement;
+  keyEl.value = '';
+  keyEl.disabled = false;
+  // The stored key is never sent to the webview, so the field can't be
+  // prefilled — an empty field means "keep the current key".
+  keyEl.placeholder = s.hasApiKey ? 'Unchanged — type to replace' : 'API key (optional, for auth proxies)';
+  const removeRow = document.getElementById('server-edit-remove-row')!;
+  removeRow.classList.toggle('hidden', !s.hasApiKey);
+  (document.getElementById('server-edit-remove-key') as HTMLInputElement).checked = false;
+  document.getElementById('server-edit-overlay')!.classList.remove('hidden');
+}
+
+function closeServerEdit(): void {
+  editingServer = null;
+  // Don't leave a typed key sitting in the (hidden) DOM.
+  (document.getElementById('server-edit-key') as HTMLInputElement).value = '';
+  document.getElementById('server-edit-overlay')!.classList.add('hidden');
+}
+
+function saveServerEdit(): void {
+  if (!editingServer) {
+    return;
+  }
+  const name = (document.getElementById('server-edit-name') as HTMLInputElement).value;
+  const url = (document.getElementById('server-edit-url') as HTMLInputElement).value;
+  const key = (document.getElementById('server-edit-key') as HTMLInputElement).value.trim();
+  const removeKey = (document.getElementById('server-edit-remove-key') as HTMLInputElement).checked;
+  if (!url.trim()) {
+    return;
+  }
+  // Tri-state key edit: remove beats replace; an untouched field keeps the key.
+  const apiKey = removeKey ? null : key || undefined;
+  post({ type: 'updateServer', id: editingServer.id, name, url, apiKey });
+  closeServerEdit();
 }
 
 // ---- Composer overflow (⋯) -------------------------------------------------
@@ -1523,11 +1622,16 @@ function renderConnection(): void {
   }
   const active = state.servers.find((s) => s.id === state.activeServerId);
   connBanner.classList.remove('hidden');
+  const auth = state.lmStudioAuthRequired;
+  const title = auth ? 'LM Studio requires an API key' : "Can't reach LM Studio";
+  const sub = auth
+    ? `<code>${escapeHtml(active?.url ?? '')}</code> rejected the request (401) — ${active?.hasApiKey ? 'the stored key was refused; update it' : 'add a key'} under <b>Servers</b>.`
+    : `<code>${escapeHtml(active?.url ?? '')}</code> isn't responding — start the server or switch.`;
   connBanner.innerHTML = `
     <span class="conn-ico"><svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1 5h2v7h-2V7zm0 9h2v2h-2v-2z"/></svg></span>
     <span class="conn-text">
-      <span class="conn-title">Can't reach LM Studio</span>
-      <span class="conn-sub"><code>${escapeHtml(active?.url ?? '')}</code> isn't responding — start the server or switch.</span>
+      <span class="conn-title">${title}</span>
+      <span class="conn-sub">${sub}</span>
     </span>
     <span class="conn-actions">
       <button class="conn-btn" id="conn-retry">Retry</button>
@@ -2597,6 +2701,7 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       state.agent = msg.agent;
       state.serverReady = msg.serverReady;
       state.lmStudioConnected = msg.lmStudioConnected;
+      state.lmStudioAuthRequired = !!msg.lmStudioAuthRequired;
       state.minContext = msg.minContext;
       renderModels();
       renderMeter();
@@ -2736,7 +2841,9 @@ function installTestHook(): void {
             ? (el.textContent ?? '').trim()
             : m.prop === 'class'
               ? el.className
-              : el.getAttribute(m.prop as string);
+              : m.prop === 'value'
+                ? ((el as HTMLInputElement).value ?? null)
+                : el.getAttribute(m.prop as string);
         reply({ count: els.length, value: els[0] ? read(els[0]) : null, values: els.map(read) });
       } else if (m.__test__ === 'click') {
         const el = document.querySelector(m.selector as string) as HTMLElement | null;

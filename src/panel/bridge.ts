@@ -19,6 +19,7 @@ import { humanizeError, isConnectionError } from '../core/errors';
 import { pickModel } from '../core/models';
 import { ConnectResult, SelfHealer } from '../core/reconnect';
 import { selectionLabel } from '../core/selection';
+import { resolveApiKeyEdit } from '../core/servers';
 import { emptySessionCandidates } from '../core/sessions';
 import { classifySkills } from '../core/skills';
 import { deriveTitle } from '../core/title';
@@ -365,17 +366,24 @@ export class ChatBridge {
           this.postServers(this.connected);
           break;
         case 'addServer':
-          await this.deps.servers.add(msg.name, msg.url);
+          await this.deps.servers.add(msg.name, msg.url, msg.apiKey);
           this.postServers(this.connected);
           break;
-        case 'updateServer':
-          await this.deps.servers.update(msg.id, msg.name, msg.url);
-          if (this.deps.servers.active().id === msg.id) {
+        case 'updateServer': {
+          const before = this.deps.servers.list().find((s) => s.id === msg.id);
+          await this.deps.servers.update(msg.id, msg.name, msg.url, msg.apiKey);
+          const after = this.deps.servers.list().find((s) => s.id === msg.id);
+          // A rename (or no-op Save) must not tear down a live session — only
+          // reconnect when something the connection depends on changed.
+          const connectionChanged =
+            !!before && !!after && (before.url !== after.url || resolveApiKeyEdit(msg.apiKey).kind !== 'keep');
+          if (this.deps.servers.active().id === msg.id && connectionChanged) {
             await this.switchServer(msg.id);
           } else {
             this.postServers(this.connected);
           }
           break;
+        }
         case 'removeServer': {
           const wasActive = this.deps.servers.active().id === msg.id;
           await this.deps.servers.remove(msg.id);
@@ -513,17 +521,24 @@ export class ChatBridge {
   private async doInit(): Promise<ConnectResult> {
     const cfg = getConfig();
     const active = this.deps.servers.active();
+    // Resolve the key BEFORE mutating the shared client: sibling panels' health
+    // ticks use it concurrently, and url+key must change as one atomic pair so
+    // a Bearer key can never be sent to a different server's host.
+    const apiKey = await this.deps.servers.apiKeyFor(active.id);
     this.deps.lmStudio.setBaseUrl(active.url);
+    this.deps.lmStudio.setApiKey(apiKey);
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
 
     this.post({ type: 'status', text: `Connecting to ${active.name}…` });
-    this.connected = await this.deps.lmStudio.checkConnection();
+    const upstream = await this.deps.lmStudio.checkConnectionStatus();
+    this.connected = upstream === 'ok';
     this.postServers(this.connected);
 
-    // Offline: show the connection screen and wait for retry / switch. The
-    // healer applies no backoff for this — the poll recovers the moment LM
-    // Studio is reachable again.
+    // Offline or unauthorized: show the connection screen and wait for retry /
+    // switch / key edit. The healer applies no backoff for this — the poll
+    // recovers the moment LM Studio accepts a request again.
     if (!this.connected) {
+      const authRequired = upstream === 'auth-required';
       this.post({
         type: 'init',
         models: [],
@@ -532,9 +547,16 @@ export class ChatBridge {
         cwd,
         serverReady: false,
         lmStudioConnected: false,
+        lmStudioAuthRequired: authRequired,
         minContext: cfg.minContextLength,
       });
-      this.post({ type: 'status', text: `Can't reach LM Studio at ${active.url}`, kind: 'warn' });
+      const text = authRequired
+        ? active.hasApiKey
+          ? `LM Studio at ${active.url} rejected the stored API key — update it under Servers`
+          : `LM Studio at ${active.url} requires an API key — add one under Servers`
+        : `Can't reach LM Studio at ${active.url}`;
+      this.post({ type: 'status', text, kind: 'warn' });
+      log(`doInit: upstream ${upstream} for ${active.url}`);
       return 'upstream-down';
     }
 
@@ -1058,7 +1080,7 @@ export class ChatBridge {
     this.connected = connected;
     this.post({
       type: 'servers',
-      servers: this.deps.servers.list().map((s) => ({ id: s.id, name: s.name, url: s.url })),
+      servers: this.deps.servers.list().map((s) => ({ id: s.id, name: s.name, url: s.url, hasApiKey: !!s.hasApiKey })),
       activeId: this.deps.servers.active().id,
       connected,
     });
