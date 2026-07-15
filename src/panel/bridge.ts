@@ -47,6 +47,8 @@ const HEALTH_INTERVAL_MS = 5000;
 const REFRESH_EVERY_TICKS = 3;
 /** globalState flag: the one-time empty-session migration has already run. */
 const PRUNED_EMPTIES_KEY = 'lmstudioCode.prunedEmptySessions';
+/** workspaceState key for persisting the current session ID across reloads. */
+const CURRENT_SESSION_ID_KEY = 'lmstudioCode.currentSessionID';
 
 export interface BridgeDeps {
   context: vscode.ExtensionContext;
@@ -401,6 +403,8 @@ export class ChatBridge {
           this.agent = msg.agent;
           break;
         case 'newChat':
+          // Clear the persisted session ID when user manually creates a new chat.
+          await this.deps.context.workspaceState.update(CURRENT_SESSION_ID_KEY, null);
           await this.newSession();
           break;
         case 'loadSessions':
@@ -414,6 +418,8 @@ export class ChatBridge {
           await this.client?.deleteSession(msg.sessionID);
           if (wasCurrent) {
             this.currentSessionID = null;
+            // Clear the persisted session ID when the active one is deleted.
+            await this.deps.context.workspaceState.update(CURRENT_SESSION_ID_KEY, null);
             await this.newSession(false);
           }
           await this.sendSessions();
@@ -584,9 +590,15 @@ export class ChatBridge {
     this.client = started.client;
 
     const models = await this.loadModels();
-    const stored = this.deps.context.workspaceState.get<string>('lmstudioCode.model');
+    const storedModel = this.deps.context.workspaceState.get<string>('lmstudioCode.model');
     this.currentModel =
-      pickModel([cfg.defaultModel, stored ?? '', this.currentModel ?? ''], models) ?? null;
+      pickModel([cfg.defaultModel, storedModel ?? '', this.currentModel ?? ''], models) ?? null;
+
+    // Restore the previously active session ID from workspace state.
+    const storedSessionID = this.deps.context.workspaceState.get<string>(CURRENT_SESSION_ID_KEY);
+    if (storedSessionID) {
+      this.currentSessionID = storedSessionID;
+    }
 
     this.startEventStream();
 
@@ -602,9 +614,24 @@ export class ChatBridge {
     });
 
     await this.sendSessions();
-    // No eager session: a fresh chat stays null until the first message creates
-    // it lazily (handleSend), so an empty "New chat" never shows in history.
-    if (!this.currentSessionID) {
+
+    // If we restored a session ID from storage, load it; otherwise create a new one.
+    if (this.currentSessionID) {
+      try {
+        const messages = await this.client.getMessages(this.currentSessionID);
+        const sessions = await this.client.listSessions();
+        const title = sessions.find((s) => s.id === this.currentSessionID)?.title ?? 'Chat';
+        this.updateTitle(title);
+        this.post({ type: 'sessionLoaded', sessionID: this.currentSessionID, title, messages });
+      } catch (err) {
+        // If the stored session no longer exists (e.g., deleted manually), fall back to a new chat.
+        log(`Stored session ${this.currentSessionID} not found, starting new chat`);
+        this.currentSessionID = null;
+        await this.newSession(false);
+      }
+    } else {
+      // No eager session: a fresh chat stays null until the first message creates
+      // it lazily (handleSend), so an empty "New chat" never shows in history.
       this.updateTitle('New chat');
       this.post({ type: 'cleared' });
     }
@@ -1090,6 +1117,9 @@ export class ChatBridge {
   private async switchServer(id: string): Promise<void> {
     await this.deps.servers.setActive(id);
     this.currentSessionID = null;
+    // Clear the persisted session ID when switching servers since sessions
+    // are per-workspace, not per-server.
+    await this.deps.context.workspaceState.update(CURRENT_SESSION_ID_KEY, null);
     this.healer.allowImmediate(); // a deliberate switch shouldn't wait on backoff
     this.teardownConnection(true);
     this.post({ type: 'cleared' });
@@ -1178,6 +1208,8 @@ export class ChatBridge {
    */
   private async newSession(announce = true): Promise<void> {
     this.currentSessionID = null;
+    // Clear the persisted session ID so we start fresh on next load.
+    await this.deps.context.workspaceState.update(CURRENT_SESSION_ID_KEY, null);
     // A goal is scoped to its conversation — leaving it ends the loop.
     this.activeGoal = null;
     this.postGoal();
@@ -1211,6 +1243,8 @@ export class ChatBridge {
           return;
         }
         this.currentSessionID = session.id;
+        // Persist the session ID so it survives VS Code reloads.
+        await this.deps.context.workspaceState.update(CURRENT_SESSION_ID_KEY, session.id);
       } finally {
         this.ensuringSession = undefined;
       }
@@ -1290,6 +1324,8 @@ export class ChatBridge {
       await this.client.deleteSession(s.id).catch(() => undefined);
     }
     this.currentSessionID = null;
+    // Clear the persisted session ID when all sessions are cleared.
+    await this.deps.context.workspaceState.update(CURRENT_SESSION_ID_KEY, null);
     await this.newSession(false);
     this.post({ type: 'cleared' });
     this.post({ type: 'status', text: '' });
@@ -1364,6 +1400,8 @@ export class ChatBridge {
     this.activeGoal = null;
     this.postGoal();
     this.currentSessionID = sessionID;
+    // Persist the session ID so it survives VS Code reloads.
+    await this.deps.context.workspaceState.update(CURRENT_SESSION_ID_KEY, sessionID);
     const messages = await this.client.getMessages(sessionID);
     const sessions = await this.client.listSessions();
     const title = sessions.find((s) => s.id === sessionID)?.title ?? 'Chat';
