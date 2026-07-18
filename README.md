@@ -41,6 +41,14 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 3. Click the spark icon in the Activity Bar.
 4. Pick a model, type a task, hit Enter.
 
+### Beta channel
+
+New features ship to the Marketplace **pre-release** channel first (odd minor
+versions, e.g. `0.13.x`; stable releases use even minors). To try betas, open
+the extension's Marketplace page in VS Code and click **Switch to Pre-Release
+Version** — VS Code updates you along the beta track and you can switch back
+any time with **Switch to Release Version**.
+
 ## Settings
 
 | Setting | Default | Description |
@@ -53,6 +61,7 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 | `lmstudioCode.autoEnsureContext` | `true` | Reload model with adequate context before prompting |
 | `lmstudioCode.minContextLength` | `16384` | Context length to (re)load with |
 | `lmstudioCode.gpuOffload` | `max` | GPU offload for `lms load` |
+| `lmstudioCode.healthCheckSeconds` | `30` | Health/model poll cadence while connected (5–600). Disconnected retries stay at 5s; the model list refreshes immediately while the model picker is open |
 | `lmstudioCode.mcpServers` | `{}` | MCP servers to expose to the agent (in addition to auto-discovered ones) |
 
 ## MCP servers

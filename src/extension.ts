@@ -124,6 +124,22 @@ export function activate(context: vscode.ExtensionContext): void {
         const panel = openChatPanel(context.extensionUri, deps);
         attachTestWebview(panel.webview);
       }),
+      // Point the extension at a test-controlled server (the e2e polling suite
+      // runs a fake LM Studio in-process). Returns what restoreServer needs to
+      // undo the registry mutation so state never leaks across runs.
+      vscode.commands.registerCommand('lmstudioCode._test.useServer', async (url: string) => {
+        const prevActiveId = deps.servers.active().id;
+        const added = await deps.servers.add('E2E Fake', url);
+        await deps.servers.setActive(added.id);
+        return { id: added.id, prevActiveId };
+      }),
+      vscode.commands.registerCommand(
+        'lmstudioCode._test.restoreServer',
+        async (state: { id: string; prevActiveId: string }) => {
+          await deps.servers.setActive(state.prevActiveId);
+          await deps.servers.remove(state.id);
+        },
+      ),
     );
   }
 }

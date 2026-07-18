@@ -1308,6 +1308,9 @@ function renderModels(): void {
 }
 
 function renderModelMenu(): void {
+  // A background refresh can rebuild the list while the user is scrolled into
+  // it — preserve the scroll position across the innerHTML rebuild.
+  const scrollTop = modelMenuList.scrollTop;
   modelMenuList.innerHTML = '';
   if (!state.models.length) {
     modelMenuList.innerHTML = `<div class="model-empty">No models found. Start LM Studio's server and download a model.</div>`;
@@ -1372,6 +1375,7 @@ function renderModelMenu(): void {
     });
     modelMenuList.appendChild(row);
   }
+  modelMenuList.scrollTop = scrollTop;
   renderCtxPresets();
 }
 
@@ -1413,6 +1417,10 @@ function toggleModelMenu(): void {
 }
 
 function openModelMenu(): void {
+  if (modelMenu.classList.contains('hidden')) {
+    // Tell the host to fast-refresh the list while the picker is open.
+    post({ type: 'modelMenu', open: true });
+  }
   renderModelMenu();
   modelMenu.classList.remove('hidden');
   // Anchor above the model button, opening upward.
@@ -1428,6 +1436,9 @@ function openModelMenu(): void {
 }
 
 function closeModelMenu(): void {
+  if (!modelMenu.classList.contains('hidden')) {
+    post({ type: 'modelMenu', open: false });
+  }
   modelMenu.classList.add('hidden');
 }
 
@@ -2719,14 +2730,18 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
     case 'models':
       state.models = msg.models;
       state.currentModel = msg.currentModel;
-      state.loadingModels.clear();
+      // Only a reply to a user action may clear in-flight load spinners or
+      // dismiss the menu — a background refresh landing mid-load must not.
+      if (msg.reason !== 'periodic') {
+        state.loadingModels.clear();
+        if (closeMenuOnLoad) {
+          // A load the user kicked off from the menu has returned — dismiss it.
+          closeMenuOnLoad = false;
+          closeModelMenu();
+        }
+      }
       renderModels();
       renderMeter();
-      if (closeMenuOnLoad) {
-        // A load the user kicked off from the menu has returned — dismiss it.
-        closeMenuOnLoad = false;
-        closeModelMenu();
-      }
       break;
     case 'sessions':
       state.sessions = msg.sessions;

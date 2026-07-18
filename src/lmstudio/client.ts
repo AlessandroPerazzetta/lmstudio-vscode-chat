@@ -3,7 +3,26 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { lmStudioRestRoot } from '../config';
+import { ProbeStatus } from '../core/health';
 import { log, logError } from '../logger';
+
+/**
+ * Whether a fetch failure came from our own AbortSignal.timeout rather than a
+ * connection-level error. Undici surfaces the signal's DOMException directly
+ * (TimeoutError) or wrapped as the `cause` of a "fetch failed" TypeError.
+ */
+function isTimeoutError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') {
+    return false;
+  }
+  const e = err as { name?: string; cause?: { name?: string } };
+  return (
+    e.name === 'TimeoutError' ||
+    e.name === 'AbortError' ||
+    e.cause?.name === 'TimeoutError' ||
+    e.cause?.name === 'AbortError'
+  );
+}
 
 export interface LMStudioModel {
   id: string;
@@ -27,7 +46,20 @@ export class LMStudioClient {
     private apiKey?: string,
   ) {}
 
+  /** Cached probe result so sibling panels' health ticks share one request. */
+  private probe: { startedAt: number; authAware: boolean; promise: Promise<ProbeStatus> } | undefined;
+  /** Whether this server answers the cheap /lmstudio-greeting liveness probe. */
+  private greetingSupported: boolean | undefined;
+  /** In-flight model listing, shared by concurrent callers. */
+  private listing: Promise<LMStudioModel[]> | undefined;
+
   setBaseUrl(url: string): void {
+    if (url !== this.baseUrl) {
+      // A different server: forget everything we learned about the old one.
+      this.probe = undefined;
+      this.greetingSupported = undefined;
+      this.listing = undefined;
+    }
     this.baseUrl = url;
   }
 
@@ -37,7 +69,14 @@ export class LMStudioClient {
 
   /** Bearer key for servers behind an authenticating proxy (per LmServer). */
   setApiKey(key: string | undefined): void {
-    this.apiKey = (key ?? '').trim() || undefined;
+    const next = (key ?? '').trim() || undefined;
+    if (next !== this.apiKey) {
+      // A cached auth verdict — and a listing fetched under the old key — are
+      // both stale under a new key.
+      this.probe = undefined;
+      this.listing = undefined;
+    }
+    this.apiKey = next;
   }
 
   getApiKey(): string | undefined {
@@ -63,12 +102,15 @@ export class LMStudioClient {
   }
 
   /**
-   * Probe the server. 'auth-required' means it answered but rejected our
-   * credentials (401/403) — a very different user problem from 'unreachable',
-   * so callers can say "fix your key" instead of "start the server".
-   * Deliberately does not log: the health loop calls this every few seconds.
+   * Auth-aware connect-time probe. 'auth-required' means the server answered
+   * but rejected our credentials (401/403) — a very different user problem
+   * from 'unreachable', so callers can say "fix your key" instead of "start
+   * the server". 'timeout' means it didn't answer in time — a saturated server
+   * mid-generation looks like this, so callers must not treat it as proof the
+   * server is gone. Used for deliberate connects (doInit); the periodic health
+   * loop uses the cheaper `probeHealth` instead.
    */
-  async checkConnectionStatus(): Promise<'ok' | 'auth-required' | 'unreachable'> {
+  async checkConnectionStatus(): Promise<ProbeStatus> {
     try {
       const res = await fetch(`${this.baseUrl}/models`, {
         signal: AbortSignal.timeout(4000),
@@ -78,13 +120,78 @@ export class LMStudioClient {
         return 'auth-required';
       }
       return res.ok ? 'ok' : 'unreachable';
-    } catch {
-      return 'unreachable';
+    } catch (err) {
+      return isTimeoutError(err) ? 'timeout' : 'unreachable';
     }
   }
 
-  async checkConnection(): Promise<boolean> {
-    return (await this.checkConnectionStatus()) === 'ok';
+  /**
+   * Cheap liveness probe for the periodic health loop. Primary is LM Studio's
+   * `/lmstudio-greeting` — the same endpoint the first-party `lms` CLI health
+   * checks; it is auth-exempt and far lighter than a model listing. Servers
+   * that don't serve it (older builds, reverse proxies) permanently fall back
+   * to the auth-aware `${baseUrl}/models` probe.
+   *
+   * Because the greeting bypasses auth, the cheap probe deliberately does NOT
+   * detect a key going bad mid-session — that surfaces on the next user
+   * action, and every reconnect path re-validates via `checkConnectionStatus`.
+   * Pass `authAware: true` (the bridge does while disconnected) to force the
+   * auth-aware /models probe — a greeting that answers 200 to a rejected key
+   * must not convince the healer to spin doInit in a reconnect loop.
+   *
+   * `maxAgeMs` shares one probe across near-simultaneous callers (every open
+   * panel runs its own health tick against this shared client): a result
+   * younger than maxAgeMs — including one still in flight — is reused instead
+   * of issuing another request. An auth-aware result satisfies a cheap
+   * request, never the reverse. Deliberately does not log.
+   */
+  async probeHealth(maxAgeMs = 0, authAware = false): Promise<ProbeStatus> {
+    const now = Date.now();
+    if (
+      this.probe &&
+      now - this.probe.startedAt <= maxAgeMs &&
+      (this.probe.authAware || !authAware)
+    ) {
+      return this.probe.promise;
+    }
+    this.probe = {
+      startedAt: now,
+      authAware,
+      promise: authAware ? this.checkConnectionStatus() : this.probeHealthOnce(),
+    };
+    return this.probe.promise;
+  }
+
+  private async probeHealthOnce(): Promise<ProbeStatus> {
+    // Snapshot the target: a probe still in flight across a server switch must
+    // not write its verdicts onto the new server's state.
+    const url = this.baseUrl;
+    if (this.greetingSupported !== false) {
+      try {
+        const res = await fetch(`${this.rest}/lmstudio-greeting`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          if (this.baseUrl === url) {
+            this.greetingSupported = true;
+          }
+          return 'ok';
+        }
+        if (res.status === 404 && this.baseUrl === url) {
+          // Definitively absent (older build / proxy route) — stop asking.
+          // Other statuses (a proxy's transient 502/503) must NOT latch: fall
+          // through to the /models probe just for this round.
+          this.greetingSupported = false;
+        }
+      } catch (err) {
+        if (isTimeoutError(err)) {
+          return 'timeout'; // don't pile a second probe on a slow server
+        }
+        // Connection-level failure: fall through and let the /models probe
+        // decide (it distinguishes auth-required from unreachable).
+      }
+    }
+    return this.checkConnectionStatus();
   }
 
   /**
@@ -97,8 +204,24 @@ export class LMStudioClient {
    * (e.g. both "qwen3.6-27b-mlx" and "unsloth/qwen3.6-27b-mlx"). The `key`
    * doubles as the model id everywhere — LM Studio accepts it for load and for
    * `/v1/chat/completions` inference, resolving it to the loaded instance.
+   *
+   * Concurrent callers (health refresh + a user send + a sibling panel) share
+   * one in-flight request instead of each hitting the server.
    */
   async listModels(): Promise<LMStudioModel[]> {
+    if (this.listing) {
+      return this.listing;
+    }
+    const p = this.doListModels().finally(() => {
+      if (this.listing === p) {
+        this.listing = undefined;
+      }
+    });
+    this.listing = p;
+    return p;
+  }
+
+  private async doListModels(): Promise<LMStudioModel[]> {
     try {
       const res = await fetch(`${this.rest}/api/v1/models`, {
         signal: AbortSignal.timeout(8000),

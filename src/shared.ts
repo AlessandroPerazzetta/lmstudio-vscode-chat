@@ -89,7 +89,10 @@ export type HostToWebview =
       lmStudioAuthRequired?: boolean;
       minContext: number;
     }
-  | { type: 'models'; models: UiModel[]; currentModel: string | null }
+  // reason 'action' = reply to something the user did (load/eject/rescan) and
+  // may clear load spinners / dismiss the picker; 'periodic' = background
+  // refresh that must not touch in-flight UI state. Absent = 'action'.
+  | { type: 'models'; models: UiModel[]; currentModel: string | null; reason?: 'action' | 'periodic' }
   | { type: 'servers'; servers: UiServer[]; activeId: string; connected: boolean }
   | { type: 'sessions'; sessions: UiSession[]; currentSessionID: string | null }
   | { type: 'sessionLoaded'; sessionID: string; title: string; messages: MessageWithParts[] }
@@ -156,6 +159,8 @@ export type WebviewToHost =
   | { type: 'unloadModel'; modelID: string }
   | { type: 'setContextSize'; tokens: number }
   | { type: 'refreshModels' }
+  // The model picker opened/closed — the host fast-polls the list while open.
+  | { type: 'modelMenu'; open: boolean }
   | { type: 'listServers' }
   | { type: 'addServer'; name: string; url: string; apiKey?: string }
   // apiKey is a tri-state edit: undefined keeps the stored key, null removes it,

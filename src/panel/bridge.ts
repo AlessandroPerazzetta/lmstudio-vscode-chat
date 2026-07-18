@@ -41,10 +41,23 @@ import {
   WebviewToHost,
 } from '../shared';
 
-/** How often the health poll runs (ms). */
-const HEALTH_INTERVAL_MS = 5000;
+/**
+ * Health poll cadence while disconnected (ms). Kept fast so a restarted
+ * LM Studio is picked up promptly; the *connected* cadence is the configurable
+ * `lmstudioCode.healthCheckSeconds` (default 30s) — issue #7: a healthy idle
+ * panel shouldn't flood LM Studio's developer log with model queries.
+ */
+const OFFLINE_HEALTH_INTERVAL_MS = 5000;
 /** Refresh the model list every N health ticks while connected. */
 const REFRESH_EVERY_TICKS = 3;
+/** Fast model-list refresh cadence while the model picker is open (ms). */
+const PICKER_REFRESH_MS = 4000;
+/**
+ * Consecutive probe timeouts before we believe LM Studio is gone. A single
+ * slow probe (server saturated mid-generation) must not pop the offline
+ * banner; a refused connection still flips immediately.
+ */
+const OFFLINE_AFTER_TIMEOUTS = 3;
 /** globalState flag: the one-time empty-session migration has already run. */
 const PRUNED_EMPTIES_KEY = 'lmstudioCode.prunedEmptySessions';
 
@@ -99,20 +112,41 @@ export class ChatBridge {
   private selectionSub: vscode.Disposable | undefined;
   private messageSub: vscode.Disposable | undefined;
   private healthTimer: ReturnType<typeof setInterval> | undefined;
+  /** Next wall-clock time (ms) the upstream probe is due; 0 = due now. */
+  private nextProbeDueAt = 0;
+  /** Fast refresh loop while the webview's model picker is open. */
+  private pickerTimer: ReturnType<typeof setInterval> | undefined;
+  /** Whether this webview is currently visible (hidden panels stay alive). */
+  private visible = true;
+  /** JSON of the last 'models' payload posted — suppresses no-op refreshes. */
+  private lastPostedModelsJson = '';
   private titleSink: ((t: string) => void) | undefined;
   private lastModels: UiModel[] = [];
   private serverExitSub: Disposable | undefined;
   /** Pure self-heal policy (reconnect timing, backoff, reload-after-reconnect). */
   private readonly healer: SelfHealer = new SelfHealer(
     {
-      upstreamReachable: () => this.deps.lmStudio.checkConnection(),
+      // Share one probe across all panels' ticks (they use this same client):
+      // a result younger than ~80% of the cadence IN EFFECT is fresh enough to
+      // reuse — while disconnected that cadence is the fast 5s one, so a
+      // restarted LM Studio really is noticed within ~5s. While disconnected
+      // the probe is also auth-aware (the greeting answers 200 even to a
+      // rejected key, which would otherwise spin doInit in a reconnect loop).
+      probeUpstream: () => {
+        const cadence = this.connected ? this.healthIntervalMs() : OFFLINE_HEALTH_INTERVAL_MS;
+        return this.deps.lmStudio.probeHealth(Math.floor(cadence * 0.8), !this.connected);
+      },
       serverHealthy: () => this.deps.server.isRunning && !!this.client,
       isConnected: () => this.connected,
       goOffline: () => this.markOffline(),
       connect: () => this.init(),
-      reloadModels: () => this.refreshModelsToWebview(),
+      reloadModels: () => this.refreshModelsToWebview('periodic'),
     },
-    { refreshEvery: REFRESH_EVERY_TICKS, backoff: { base: 2000, max: 30000 } },
+    {
+      refreshEvery: REFRESH_EVERY_TICKS,
+      offlineAfterTimeouts: OFFLINE_AFTER_TIMEOUTS,
+      backoff: { base: 2000, max: 30000 },
+    },
   );
 
   constructor(
@@ -146,25 +180,67 @@ export class ChatBridge {
       clearInterval(this.healthTimer);
       this.healthTimer = undefined;
     }
+    if (this.pickerTimer) {
+      clearInterval(this.pickerTimer);
+      this.pickerTimer = undefined;
+    }
+  }
+
+  /** The connected-state poll cadence (ms), from user settings. */
+  private healthIntervalMs(): number {
+    return getConfig().healthCheckSeconds * 1000;
   }
 
   /**
    * Poll so the panel self-heals. The policy (when to reconnect, how to back
-   * off, when to reload models) lives in the pure, unit-tested `SelfHealer`;
-   * this shell just drives it on a timer.
+   * off, when to reload models) lives in the pure, unit-tested `SelfHealer`.
+   *
+   * The timer is a fixed 5s metronome that only PROBES when due: every tick
+   * while disconnected, every healthCheckSeconds while connected. A fixed
+   * interval (rather than a rescheduled timeout) survives a tick that throws,
+   * and reacts within 5s when some out-of-tick path flips us offline —
+   * postServers(false) resets the due time. Config changes take effect on the
+   * next due probe.
    */
   private startHealthPoll(): void {
     if (this.healthTimer || this.disposed) {
       return;
     }
-    this.healthTimer = setInterval(() => void this.runHealthTick(), HEALTH_INTERVAL_MS);
+    this.healthTimer = setInterval(() => void this.runHealthTick(), OFFLINE_HEALTH_INTERVAL_MS);
+  }
+
+  /**
+   * Visibility changed (sidebar collapsed, tab moved to background). Hidden
+   * panels keep their slow self-heal poll but skip model refreshes; on
+   * becoming visible again, catch up immediately.
+   */
+  setVisible(visible: boolean): void {
+    if (visible === this.visible) {
+      return;
+    }
+    this.visible = visible;
+    if (visible && this.connected) {
+      void this.refreshModelsToWebview('periodic');
+    }
   }
 
   private async runHealthTick(): Promise<void> {
     if (this.disposed || this.connecting) {
       return;
     }
-    await this.healer.tick();
+    if (Date.now() >= this.nextProbeDueAt) {
+      const started = Date.now();
+      try {
+        await this.healer.tick();
+      } finally {
+        // While disconnected the next metronome tick (5s) probes again; while
+        // connected wait out the configured cadence. Anchor to the tick START
+        // (minus slack for timer drift) — anchoring to completion would push
+        // the due time past the next tick whenever the cadence equals the
+        // metronome period, silently halving the probe rate.
+        this.nextProbeDueAt = this.connected ? started + this.healthIntervalMs() - 500 : 0;
+      }
+    }
     // Goal watchdog ("wake up on occasion"): if the loop lost its idle signal
     // (e.g. an error swallowed the event) re-check once things are quiet.
     if (
@@ -331,6 +407,10 @@ export class ChatBridge {
     try {
       switch (msg.type) {
         case 'ready':
+          // A fresh webview always starts with the picker closed — stop any
+          // fast-poll loop a previous webview incarnation left running (iframe
+          // reloads never send modelMenu open:false).
+          this.setModelMenuOpen(false);
           await this.init();
           break;
         case 'send':
@@ -361,6 +441,9 @@ export class ChatBridge {
           break;
         case 'refreshModels':
           await this.refreshModelsToWebview();
+          break;
+        case 'modelMenu':
+          this.setModelMenuOpen(msg.open);
           break;
         case 'listServers':
           this.postServers(this.connected);
@@ -538,7 +621,13 @@ export class ChatBridge {
     // switch / key edit. The healer applies no backoff for this — the poll
     // recovers the moment LM Studio accepts a request again.
     if (!this.connected) {
+      // 'timeout' lands here too: for a user-facing connect attempt a server
+      // that won't answer is indistinguishable from one that's gone.
       const authRequired = upstream === 'auth-required';
+      // The webview now shows models: [] — resync the periodic diff-guard so
+      // the next healthy refresh always posts (a stale healthy snapshot here
+      // would suppress it and freeze the picker on "No models found").
+      this.lastPostedModelsJson = '';
       this.post({
         type: 'init',
         models: [],
@@ -569,6 +658,7 @@ export class ChatBridge {
       // healer backs off instead of respawning a broken server every tick.
       logError('opencode server failed to start', err);
       this.post({ type: 'error', message: humanizeError(err, { subject: 'OpenCode' }) });
+      this.lastPostedModelsJson = ''; // webview shows models: [] — resync diff-guard
       this.post({
         type: 'init',
         models: [],
@@ -585,11 +675,15 @@ export class ChatBridge {
 
     const models = await this.loadModels();
     const stored = this.deps.context.workspaceState.get<string>('lmstudioCode.model');
+    // The live in-session selection wins over configuration: a self-heal
+    // reconnect mid-conversation must never silently switch the user's model
+    // back to defaultModel. defaultModel only decides on a fresh panel.
     this.currentModel =
-      pickModel([cfg.defaultModel, stored ?? '', this.currentModel ?? ''], models) ?? null;
+      pickModel([this.currentModel ?? '', cfg.defaultModel, stored ?? ''], models) ?? null;
 
     this.startEventStream();
 
+    this.lastPostedModelsJson = JSON.stringify({ models, currentModel: this.currentModel });
     this.post({
       type: 'init',
       models,
@@ -1078,6 +1172,12 @@ export class ChatBridge {
 
   private postServers(connected: boolean): void {
     this.connected = connected;
+    if (!connected) {
+      // Some flips to offline happen outside a health tick (a failed send's
+      // reconnect, switching to a dead server) — make the next 5s metronome
+      // tick probe immediately instead of waiting out the connected cadence.
+      this.nextProbeDueAt = 0;
+    }
     this.post({
       type: 'servers',
       servers: this.deps.servers.list().map((s) => ({ id: s.id, name: s.name, url: s.url, hasApiKey: !!s.hasApiKey })),
@@ -1096,9 +1196,48 @@ export class ChatBridge {
     await this.init();
   }
 
-  private async refreshModelsToWebview(): Promise<void> {
+  /**
+   * Push a fresh model list to the webview.
+   *
+   * 'action' (user did something: load/eject/rescan/reconnect) always posts —
+   * the webview uses the reply to clear load spinners and dismiss the menu.
+   * 'periodic' (health cadence / picker loop / visibility catch-up) is
+   * best-effort: skipped while hidden or disconnected, and suppressed when
+   * nothing changed so the webview isn't re-rendered every cycle for no reason.
+   */
+  private async refreshModelsToWebview(reason: 'action' | 'periodic' = 'action'): Promise<void> {
+    if (reason === 'periodic' && (!this.visible || !this.connected)) {
+      return;
+    }
     const models = await this.loadModels();
-    this.post({ type: 'models', models, currentModel: this.currentModel });
+    if (reason === 'periodic' && models.length === 0) {
+      // A transient listing failure surfaces as [] — never blank a populated
+      // picker from a background refresh; an 'action' post stays authoritative.
+      return;
+    }
+    const payload = { models, currentModel: this.currentModel };
+    const json = JSON.stringify(payload);
+    if (reason === 'periodic' && json === this.lastPostedModelsJson) {
+      return;
+    }
+    this.lastPostedModelsJson = json;
+    this.post({ type: 'models', ...payload, reason });
+  }
+
+  /** The webview's model picker opened/closed: run a fast refresh loop while open. */
+  private setModelMenuOpen(open: boolean): void {
+    if (open) {
+      if (!this.pickerTimer && !this.disposed) {
+        void this.refreshModelsToWebview('periodic');
+        this.pickerTimer = setInterval(
+          () => void this.refreshModelsToWebview('periodic'),
+          PICKER_REFRESH_MS,
+        );
+      }
+    } else if (this.pickerTimer) {
+      clearInterval(this.pickerTimer);
+      this.pickerTimer = undefined;
+    }
   }
 
   private async handleLoadModel(modelID: string): Promise<void> {
@@ -1401,8 +1540,7 @@ export class ChatBridge {
         log(`ensureContext: ${result.note}`);
       }
       if (result.reloaded) {
-        const models = await this.loadModels();
-        this.post({ type: 'models', models, currentModel: this.currentModel });
+        await this.refreshModelsToWebview('periodic');
       }
       this.post({ type: 'status', text: '' });
     }

@@ -7,11 +7,23 @@
  *   1. LM Studio itself is unreachable (show the offline banner, wait for it).
  *   2. LM Studio is up but the OpenCode server died / we lost our client
  *      (silently restart + reconnect, with backoff so we don't hammer it).
+ *
+ * A third state sits between them: the probe *timed out*. A saturated server
+ * (mid-generation) answers slowly but isn't gone, so timeouts only flip us
+ * offline after a consecutive streak — one slow probe must never pop the
+ * offline banner during a long generation (issue #7).
  */
 
+/** Result of one reachability probe against LM Studio. */
+export type ProbeStatus = 'ok' | 'auth-required' | 'timeout' | 'unreachable';
+
 export interface HealthInputs {
-  /** LM Studio /models reachable right now. */
-  lmStudioOk: boolean;
+  /** What the LM Studio probe returned this tick. */
+  upstream: ProbeStatus;
+  /** Consecutive 'timeout' probes, including this one when it timed out. */
+  timeoutStreak: number;
+  /** Timeouts tolerated while connected before we believe the server is gone. */
+  offlineAfterTimeouts: number;
   /** Whether the bridge currently considers LM Studio connected. */
   connected: boolean;
   /** OpenCode server process alive AND we hold a client for it. */
@@ -31,14 +43,22 @@ export type HealthAction = 'none' | 'go-offline' | 'reconnect' | 'refresh-models
 /**
  * Decide what the health poll should do this tick.
  *
- * - LM Studio down + we thought we were online  -> go-offline (show banner)
- * - LM Studio down + already offline            -> none (keep waiting)
- * - LM Studio up + not connected / server dead  -> reconnect (once backoff allows)
- * - LM Studio up + healthy, on a refresh tick   -> refresh-models
- * - otherwise                                    -> none
+ * - probe timed out              -> go-offline only after a consecutive streak
+ *                                   (a busy server is not a dead server);
+ *                                   never pile more requests on it meanwhile
+ * - hard-down + we were online   -> go-offline (show banner)
+ * - hard-down + already offline  -> none (keep waiting)
+ * - up + not connected / dead    -> reconnect (once backoff allows)
+ * - up + healthy, refresh tick   -> refresh-models
+ * - otherwise                    -> none
  */
 export function decideHealthAction(i: HealthInputs): HealthAction {
-  if (!i.lmStudioOk) {
+  if (i.upstream === 'timeout') {
+    return i.connected && i.timeoutStreak >= i.offlineAfterTimeouts ? 'go-offline' : 'none';
+  }
+  if (i.upstream !== 'ok') {
+    // 'unreachable' (connection refused — the server really is gone) and
+    // 'auth-required' (it answered but rejected us) both flip immediately.
     return i.connected ? 'go-offline' : 'none';
   }
   // LM Studio is reachable.

@@ -2,7 +2,7 @@
   "name": "lmstudio-code",
   "displayName": "LM Studio Code",
   "description": "Agentic coding panel for your local LM Studio models. A Claude Code / Codex–style chat experience powered by the open-source OpenCode agent, running entirely against your local models.",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "publisher": "cgaspard",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -148,6 +148,13 @@
           "type": "string",
           "default": "max",
           "description": "GPU offload ratio passed to 'lms load' when reloading a model for context (off | max | 0..1)."
+        },
+        "lmstudioCode.healthCheckSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 600,
+          "description": "How often (seconds) to check that LM Studio is reachable and refresh model state while connected. While disconnected the extension retries every 5 seconds regardless, and the model list refreshes immediately whenever the model picker is open. Lower values react faster but add more requests to LM Studio's server log. Takes effect within one poll cycle."
         },
         "lmstudioCode.mcpServers": {
           "type": "object",
