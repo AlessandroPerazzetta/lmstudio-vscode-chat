@@ -60,6 +60,15 @@ const PICKER_REFRESH_MS = 4000;
 const OFFLINE_AFTER_TIMEOUTS = 3;
 /** globalState flag: the one-time empty-session migration has already run. */
 const PRUNED_EMPTIES_KEY = 'lmstudioCode.prunedEmptySessions';
+/** workspaceState key: the last active session, restored on the next launch. */
+const LAST_SESSION_KEY = 'lmstudioCode.lastSessionID';
+/**
+ * Window-scoped claim so only the FIRST bridge to initialize (in practice the
+ * sidebar view on launch) restores the persisted session — every panel shares
+ * the one workspaceState slot, and siblings must not all open the same
+ * conversation.
+ */
+let sessionRestoreClaimed = false;
 
 export interface BridgeDeps {
   context: vscode.ExtensionContext;
@@ -85,6 +94,8 @@ export class ChatBridge {
   private agentsWarned = false;
   /** In-flight createSession promise, so concurrent first-sends share one. */
   private ensuringSession: Promise<void> | undefined;
+  /** Whether this bridge already ran its one launch-time session restore. */
+  private restoreAttempted = false;
   /**
    * The active goal loop, or null. `paused` keeps the goal pinned without
    * auto-continuing (user pressed Stop / pause, or a safety cap tripped).
@@ -696,6 +707,11 @@ export class ChatBridge {
     });
 
     await this.sendSessions();
+    // Restore the last active conversation — idea contributed by
+    // @AlessandroPerazzetta (PR #8), reworked to run only on a bridge's FIRST
+    // init: doInit also runs on every self-heal reconnect, where re-posting
+    // sessionLoaded would wipe and re-render a live transcript.
+    await this.maybeRestoreLastSession();
     // No eager session: a fresh chat stays null until the first message creates
     // it lazily (handleSend), so an empty "New chat" never shows in history.
     if (!this.currentSessionID) {
@@ -1190,6 +1206,7 @@ export class ChatBridge {
   private async switchServer(id: string): Promise<void> {
     await this.deps.servers.setActive(id);
     this.currentSessionID = null;
+    this.persistSession(null);
     this.healer.allowImmediate(); // a deliberate switch shouldn't wait on backoff
     this.teardownConnection(true);
     this.post({ type: 'cleared' });
@@ -1317,6 +1334,7 @@ export class ChatBridge {
    */
   private async newSession(announce = true): Promise<void> {
     this.currentSessionID = null;
+    this.persistSession(null);
     // A goal is scoped to its conversation — leaving it ends the loop.
     this.activeGoal = null;
     this.postGoal();
@@ -1350,6 +1368,7 @@ export class ChatBridge {
           return;
         }
         this.currentSessionID = session.id;
+        this.persistSession(session.id);
       } finally {
         this.ensuringSession = undefined;
       }
@@ -1495,6 +1514,48 @@ export class ChatBridge {
     }
   }
 
+  /** Remember (or forget) the active session so the next launch can restore it. */
+  private persistSession(id: string | null): void {
+    void this.deps.context.workspaceState.update(LAST_SESSION_KEY, id ?? undefined);
+  }
+
+  /**
+   * On the first init of a fresh bridge, reopen the conversation that was
+   * active when the window closed. Never on reconnects (restoreAttempted), and
+   * only one panel per window may claim the restore (sessionRestoreClaimed).
+   */
+  private async maybeRestoreLastSession(): Promise<void> {
+    if (this.restoreAttempted || this.currentSessionID || sessionRestoreClaimed || !this.client) {
+      this.restoreAttempted = true;
+      return;
+    }
+    this.restoreAttempted = true;
+    const stored = this.deps.context.workspaceState.get<string>(LAST_SESSION_KEY);
+    if (!stored) {
+      return;
+    }
+    sessionRestoreClaimed = true;
+    try {
+      // Validate against the real session list — getMessages on a deleted id
+      // can return an empty transcript rather than throwing.
+      const sessions = await this.client.listSessions();
+      const match = sessions.find((s) => s.id === stored);
+      if (!match) {
+        this.persistSession(null); // deleted elsewhere — forget the stale id
+        return;
+      }
+      const messages = await this.client.getMessages(stored);
+      this.currentSessionID = stored;
+      const title = match.title || 'Chat';
+      this.updateTitle(title);
+      this.post({ type: 'sessionLoaded', sessionID: stored, title, messages });
+    } catch (err) {
+      // Restore is best-effort — fall back to the normal fresh-chat path.
+      logError('restore last session', err);
+      this.currentSessionID = null;
+    }
+  }
+
   private async loadSession(sessionID: string): Promise<void> {
     if (!this.client) {
       return;
@@ -1503,6 +1564,7 @@ export class ChatBridge {
     this.activeGoal = null;
     this.postGoal();
     this.currentSessionID = sessionID;
+    this.persistSession(sessionID);
     const messages = await this.client.getMessages(sessionID);
     const sessions = await this.client.listSessions();
     const title = sessions.find((s) => s.id === sessionID)?.title ?? 'Chat';
